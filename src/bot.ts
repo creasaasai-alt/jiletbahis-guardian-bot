@@ -178,27 +178,24 @@ cron.schedule('* * * * *', async () => {
 });
 
 // Admin komutları
-bot.command('status', async (ctx) => {
+bot.command(['status', 'test'], async (ctx) => {
   const state = DomainService.getState();
-  let msg = `🛠️ **Sistem Durumu:**\n\n`;
-  msg += `👉 **Aktif Domain:** \`${state.currentDomain}\`\n`;
-  msg += `⚙️ **Durum:** \`${state.currentState}\`\n`;
+  let msg = `🛠️ **Sistem Kontrolü (Radar Aktif)**\n\n`;
+  msg += `👉 **İzlenen Domain:** \`${state.currentDomain}\`\n`;
+  msg += `⚙️ **Sistem Durumu:** \`${state.currentState}\`\n`;
   if (state.pendingDomain) {
-    msg += `⏳ **Beklenen Domain:** \`${state.pendingDomain}\`\n`;
+    msg += `⏳ **Beklenen (Hedef) Domain:** \`${state.pendingDomain}\`\n`;
   }
   await ctx.reply(msg, { parse_mode: 'Markdown' });
 });
 
-// Adminlerin test etmesi için manuel tetikleyici
-// Adminlerin mesaj tasarımlarını görmesi için Test Önizleme (Preview) komutu
-bot.command('testengel', async (ctx) => {
-  console.log("TEST KOMUTU GELDİ!");
-  
+// BTK Engeli simülasyonu
+bot.command('testdomain', async (ctx) => {
   const state = DomainService.getState();
   const current = state.currentDomain;
   const next = DomainService.getNextDomain(current);
 
-  await ctx.reply("⚠️ **TEST MODU BAŞLADI:** Aşağıdaki mesajlar sadece tasarım önizlemesidir. Sistem hafızası değiştirilmedi.", { parse_mode: 'Markdown' });
+  await ctx.reply("⚠️ **TEST ÖNİZLEME:** BTK Engeli uyarıları gösteriliyor...", { parse_mode: 'Markdown' });
 
   // 1. Patlama Alarmını Yolla
   await sendBlockedAlert(current, next);
@@ -211,8 +208,21 @@ bot.command('testengel', async (ctx) => {
   // 3. Birkaç saniye sonra Başarı Mesajını Yolla
   setTimeout(async () => {
     await sendSuccessAlert(next);
-    await ctx.reply("✅ **TEST BİTTİ:** Sistemin güncel domaini hala `" + current + "` olarak korunuyor.", { parse_mode: 'Markdown' });
   }, 4000);
+});
+
+// Sunucu Çökme simülasyonu
+bot.command('testcokme', async (ctx) => {
+  const state = DomainService.getState();
+  const current = state.currentDomain;
+
+  await ctx.reply("⚠️ **TEST ÖNİZLEME:** Sunucu Çökme ve Kurtarma uyarıları gösteriliyor...", { parse_mode: 'Markdown' });
+
+  await sendServerDownAlert();
+
+  setTimeout(async () => {
+    await sendServerRecoveryAlert(current);
+  }, 3000);
 });
 
 // Bot başlatılmadan önce Akıllı Tarama (Auto-Discovery) yaparak gerçek domaini bulur
