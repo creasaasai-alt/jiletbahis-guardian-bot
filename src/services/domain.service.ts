@@ -4,7 +4,7 @@ import path from 'path';
 // docs/STATE.json dosyasının tam yolu
 const STATE_FILE_PATH = path.join(__dirname, '../../docs/STATE.json');
 
-export type BotState = 'OK' | 'PENDING' | 'RE_ALERT';
+export type BotState = 'OK' | 'PENDING' | 'RE_ALERT' | 'SERVER_DOWN';
 
 interface StateData {
   currentDomain: string;
@@ -48,24 +48,17 @@ export class DomainService {
   }
 
   /**
-   * Domain ismindeki sayıyı bulup 1 artırarak yeni domaini hesaplar.
-   * Örn: "jiletbahis102.com" -> "jiletbahis103.com"
+   * Domain sonundaki numarayı alır ve istenen adım (steps) kadar artırıp yeni domaini döndürür.
+   * Lookahead özelliği için steps parametresi eklendi.
+   * Örn: (jiletbahis102.com, 5) -> jiletbahis107.com
    */
-  static getNextDomain(currentDomain: string): string {
-    // Sadece rakamları yakalayan Regex
-    const regex = /(\d+)/;
-    const match = currentDomain.match(regex);
-
-    if (match && match[0]) {
-      const currentNumber = parseInt(match[0], 10);
-      const nextNumber = currentNumber + 1;
-      
-      // Rakamı yeni rakamla değiştir
-      return currentDomain.replace(regex, nextNumber.toString());
+  static getNextDomain(currentDomain: string, steps: number = 1): string {
+    const match = currentDomain.match(/(\d+)(\.[a-z]+)$/i);
+    if (match) {
+      const currentNumber = parseInt(match[1], 10);
+      const nextNumber = currentNumber + steps;
+      return currentDomain.replace(match[1], nextNumber.toString());
     }
-
-    // Eğer domainde rakam yoksa, manuel müdahale gerekebilir.
-    // Şimdilik aynısını döndürüyoruz.
     return currentDomain;
   }
 }

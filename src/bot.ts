@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { Telegraf } from 'telegraf';
 import cron from 'node-cron';
+import http from 'http';
 import { DnsService } from './services/dns.service';
 import { DomainService } from './services/domain.service';
 
@@ -60,6 +61,32 @@ const sendSuccessAlert = async (newDomain: string) => {
   }
 };
 
+const sendServerDownAlert = async () => {
+  const message = `⚠️ **Sistem Erişimi Kesintisi**\n\n` +
+                  `Sunucularımıza bağlantı şu anda kurulamıyor. Teknik ekibimiz sorunu inceliyor, lütfen bekleyiniz.`;
+  try {
+    await bot.telegram.sendMessage(groupId, message, {
+      parse_mode: 'Markdown',
+      message_thread_id: topicId
+    });
+  } catch (error) {
+    console.error("SUNUCU ÇÖKME bildirimi gönderilemedi:", error);
+  }
+};
+
+const sendServerRecoveryAlert = async (domain: string) => {
+  const message = `✅ **Sistem Erişimi Sağlandı**\n\n` +
+                  `Sunucularımızdaki erişim sorunu giderilmiştir. Güncel adresimiz (\`${domain}\`) üzerinden işlemlerinize devam edebilirsiniz.`;
+  try {
+    await bot.telegram.sendMessage(groupId, message, {
+      parse_mode: 'Markdown',
+      message_thread_id: topicId
+    });
+  } catch (error) {
+    console.error("SUNUCU KURTARMA bildirimi gönderilemedi:", error);
+  }
+};
+
 // --- OTOMATİK TAKİP VE STATE MACHINE (CRON) ---
 
 // Her 1 dakikada bir çalışacak
@@ -68,57 +95,78 @@ cron.schedule('* * * * *', async () => {
   const now = new Date();
 
   try {
-    if (state.currentState === 'OK') {
-      // Normal izleme: Aktif domain patlamış mı?
+    if (state.currentState === 'OK' || state.currentState === 'SERVER_DOWN') {
+      // 1. Önce BTK Engeli Var Mı? (En Önemlisi)
       const isBlocked = await DnsService.isDomainBlockedByBTK(state.currentDomain);
       
       if (isBlocked) {
         console.log(`🚨 DİKKAT: ${state.currentDomain} BTK tarafından engellendi!`);
         
-        // Hedef domaini hesapla
-        const nextDomain = DomainService.getNextDomain(state.currentDomain);
-        
-        // State'i güncelle
+        const nextDomain = DomainService.getNextDomain(state.currentDomain, 1);
         state.currentState = 'PENDING';
-        state.pendingDomain = nextDomain;
+        state.pendingDomain = nextDomain; // Sadece log/info için
         state.blockedAt = now.toISOString();
         DomainService.saveState(state);
 
-        // Bildirim at
         await sendBlockedAlert(state.currentDomain, nextDomain);
+        return; // İşlem bitti, devam etme
+      }
+      
+      // 2. BTK Engeli yoksa sunucu hayatta mı? (HTTP Check)
+      const isHealthy = await DnsService.isServerHealthy(state.currentDomain);
+      
+      if (!isHealthy && state.currentState === 'OK') {
+        console.log(`⚠️ SUNUCU ÇÖKTÜ: ${state.currentDomain} HTTP 200 dönmüyor!`);
+        state.currentState = 'SERVER_DOWN';
+        DomainService.saveState(state);
+        await sendServerDownAlert();
+      } 
+      else if (isHealthy && state.currentState === 'SERVER_DOWN') {
+        console.log(`✅ SUNUCU GERİ GELDİ: ${state.currentDomain}`);
+        state.currentState = 'OK';
+        DomainService.saveState(state);
+        await sendServerRecoveryAlert(state.currentDomain);
       }
     } 
     else if (state.currentState === 'PENDING' || state.currentState === 'RE_ALERT') {
-      // Geçiş bekleniyor durumu: Hedef domain aktif oldu mu?
-      if (!state.pendingDomain || !state.blockedAt) return;
+      // Geçiş bekleniyor durumu: Lookahead 20 (İleri Gözlem) Taraması
+      if (!state.blockedAt) return;
+      
+      let foundActiveDomain = null;
+      
+      // Sağlayıcı 103 yerine 105'i bile açsa hemen bulmak için +1'den +20'ye kadar tara
+      for (let i = 1; i <= 20; i++) {
+        const testDomain = DomainService.getNextDomain(state.currentDomain, i);
+        // Hem DNS aktif mi (BTK yememiş ve IP dönüyor) hem de sunucu 200 dönüyor mu?
+        if (await DnsService.isDomainActive(testDomain) && await DnsService.isServerHealthy(testDomain)) {
+          foundActiveDomain = testDomain;
+          break; // Bulduk, çık
+        }
+      }
 
-      const isTargetActive = await DnsService.isDomainActive(state.pendingDomain);
-
-      if (isTargetActive) {
-        console.log(`✅ YENİ DOMAİN AKTİF: ${state.pendingDomain}`);
+      if (foundActiveDomain) {
+        console.log(`✅ YENİ DOMAİN AKTİF (LOOKAHEAD): ${foundActiveDomain}`);
         
-        // Başarı bildirimini at
-        await sendSuccessAlert(state.pendingDomain);
+        await sendSuccessAlert(foundActiveDomain);
         
-        // State'i güncelle ve normale dön
-        state.currentDomain = state.pendingDomain;
+        state.currentDomain = foundActiveDomain;
         state.currentState = 'OK';
         state.pendingDomain = null;
         state.blockedAt = null;
         DomainService.saveState(state);
       } 
       else {
-        // Hedef henüz aktif değil. Süreyi kontrol et. (15 dakika = 15 * 60 * 1000 ms)
+        // Hedeflerden hiçbiri aktif değil. Süreyi kontrol et.
         const blockedTime = new Date(state.blockedAt).getTime();
         const diffMinutes = (now.getTime() - blockedTime) / (1000 * 60);
 
         if (diffMinutes >= 15 && state.currentState === 'PENDING') {
-          console.log(`⚠️ 15 DAKİKA GEÇTİ, SAĞLAYICI GECİKTİ: ${state.pendingDomain}`);
+          // Gecikme uyarısında tahmini domaini (current + 1) gösteriyoruz
+          const expectedNext = DomainService.getNextDomain(state.currentDomain, 1);
+          console.log(`⚠️ 15 DAKİKA GEÇTİ, SAĞLAYICI GECİKTİ: Beklenen ${expectedNext}`);
           
-          // Gecikme uyarısı at
-          await sendDelayAlert(state.pendingDomain);
+          await sendDelayAlert(expectedNext);
           
-          // Aynı uyarıyı tekrar tekrar atmamak için state'i RE_ALERT yap
           state.currentState = 'RE_ALERT';
           DomainService.saveState(state);
         }
@@ -142,24 +190,71 @@ bot.command('status', async (ctx) => {
 });
 
 // Adminlerin test etmesi için manuel tetikleyici
+// Adminlerin mesaj tasarımlarını görmesi için Test Önizleme (Preview) komutu
 bot.command('testengel', async (ctx) => {
-  const state = DomainService.getState();
-  if (state.currentState !== 'OK') {
-    return ctx.reply("Zaten bir geçiş süreci devam ediyor.");
-  }
+  console.log("TEST KOMUTU GELDİ!");
   
-  const nextDomain = DomainService.getNextDomain(state.currentDomain);
-  state.currentState = 'PENDING';
-  state.pendingDomain = nextDomain;
-  state.blockedAt = new Date().toISOString();
-  DomainService.saveState(state);
+  const state = DomainService.getState();
+  const current = state.currentDomain;
+  const next = DomainService.getNextDomain(current);
 
-  await sendBlockedAlert(state.currentDomain, nextDomain);
-  ctx.reply("⚠️ Test engeli simüle edildi. Sistem PENDING moduna geçti.");
+  await ctx.reply("⚠️ **TEST MODU BAŞLADI:** Aşağıdaki mesajlar sadece tasarım önizlemesidir. Sistem hafızası değiştirilmedi.", { parse_mode: 'Markdown' });
+
+  // 1. Patlama Alarmını Yolla
+  await sendBlockedAlert(current, next);
+
+  // 2. Birkaç saniye sonra Gecikme Uyarısını Yolla
+  setTimeout(async () => {
+    await sendDelayAlert(next);
+  }, 2000);
+
+  // 3. Birkaç saniye sonra Başarı Mesajını Yolla
+  setTimeout(async () => {
+    await sendSuccessAlert(next);
+    await ctx.reply("✅ **TEST BİTTİ:** Sistemin güncel domaini hala `" + current + "` olarak korunuyor.", { parse_mode: 'Markdown' });
+  }, 4000);
 });
 
-bot.launch().then(() => {
-  console.log("🛡️ Domain Tip Botu başarıyla başlatıldı ve DNS izleme devrede...");
+// Bot başlatılmadan önce Akıllı Tarama (Auto-Discovery) yaparak gerçek domaini bulur
+const initializeSystem = async () => {
+  const state = DomainService.getState();
+  let current = state.currentDomain;
+
+  console.log(`🔍 Başlangıç taraması yapılıyor... Kayıtlı domain: ${current}`);
+  
+  // Eğer sunucu yeniden başlarsa ve eski domain hafızada kalmışsa, sessizce güncel olanı bulana kadar tarar.
+  let isBlocked = await DnsService.isDomainBlockedByBTK(current);
+  while (isBlocked) {
+    console.log(`❌ ${current} engelli. Bir sonrakine bakılıyor...`);
+    current = DomainService.getNextDomain(current);
+    isBlocked = await DnsService.isDomainBlockedByBTK(current);
+  }
+
+  if (current !== state.currentDomain) {
+    console.log(`✅ Akıllı Tarama: Güncel aktif domain ${current} olarak tespit edildi ve hafıza güncellendi!`);
+    state.currentDomain = current;
+    state.currentState = 'OK';
+    state.pendingDomain = null;
+    DomainService.saveState(state);
+  } else {
+    console.log(`✅ Sistem güncel. İzlenen domain: ${current}`);
+  }
+
+  // Tarama bittikten sonra botu başlat
+  bot.launch().then(() => {
+    console.log("🛡️ Domain Tip Botu başarıyla başlatıldı ve DNS izleme devrede...");
+  });
+};
+
+initializeSystem();
+
+// Render Web Service İçin Dummy HTTP Sunucusu (Render'ın botu kapatmasını engeller)
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('JiletBahis Domain Radar Bot is Alive!\n');
+}).listen(PORT, () => {
+  console.log(`🌐 Dummy Web Sunucusu ${PORT} portunda çalışıyor (Render Uyumluluğu)`);
 });
 
 // Kapanış sinyallerini yakala
