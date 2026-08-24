@@ -98,7 +98,7 @@ export class DnsService {
       await axios.head(`https://${domain}`, {
         timeout: 8000,
         maxRedirects: 3,
-        validateStatus: (s) => s < 600,
+        validateStatus: (s) => s >= 200 && s < 400, // Sadece 200-399 arası gerçek başarıdır. 404 veya 522 geçersizdir.
       });
       return true;
     } catch {

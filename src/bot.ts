@@ -53,9 +53,9 @@ const sendBlockedAlert = async (oldDomain: string, targetDomain: string, dnsChec
 };
 
 const sendDelayAlert = async (targetDomain: string) => {
-  const message = `⚠️ **GEÇİŞ GECİKTİ!**\n\n` +
-                  `Engel tespit edileli 15 dakika oldu ancak \`${targetDomain}\` hala aktif olarak yanıt vermiyor (HTTP 200 dönmüyor).\n\n` +
-                  `Lütfen sunucu ve Cloudflare yönlendirmelerini acilen kontrol ediniz.`;
+  const message = `⚠️ **HATIRLATMA: GEÇİŞ BEKLENİYOR**\n\n` +
+                  `Mevcut domain hala engelli durumda. Yeni adresin (\`${targetDomain}\`) aktif olması (HTTP 200) bekleniyor.\n\n` +
+                  `Lütfen yönlendirmelerin yapıldığından emin olunuz. 2 saatte bir durum kontrolü yapılacaktır.`;
   try {
     await bot.telegram.sendMessage(groupId, message, {
       parse_mode: 'Markdown',
@@ -127,6 +127,7 @@ cron.schedule('* * * * *', async () => {
         state.currentState = 'PENDING';
         state.pendingDomain = nextDomain; 
         state.blockedAt = now.toISOString();
+        state.lastAlertAt = now.toISOString();
         DomainService.saveState(state);
 
         await sendBlockedAlert(state.currentDomain, nextDomain, dnsCheck);
@@ -150,23 +151,23 @@ cron.schedule('* * * * *', async () => {
       }
     } 
     else if (state.currentState === 'PENDING' || state.currentState === 'RE_ALERT') {
-      // Geçiş bekleniyor durumu: Lookahead 20 (İleri Gözlem) Taraması
+      // Geçiş bekleniyor: İleri Gözlem Taraması (Lookahead)
       if (!state.blockedAt) return;
       
       let foundActiveDomain = null;
       
-      // Sağlayıcı 103 yerine 105'i bile açsa hemen bulmak için +1'den +20'ye kadar tara
-      for (let i = 1; i <= 20; i++) {
+      // Yazılımcı 103 yerine 105'i bile açsa hemen bulmak için +1'den +10'a kadar tara
+      for (let i = 1; i <= 10; i++) {
         const testDomain = DomainService.getNextDomain(state.currentDomain, i);
-        // Hem DNS aktif mi (BTK yememiş ve IP dönüyor) hem de sunucu 200 dönüyor mu?
+        // Hem DNS aktif mi (BTK yememiş) hem de sunucu GERÇEKTEN 200 dönüyor mu? (404 veya 522 DEĞİL)
         if (await DnsService.isDomainActive(testDomain) && await DnsService.isServerHealthy(testDomain)) {
           foundActiveDomain = testDomain;
-          break; // Bulduk, çık
+          break;
         }
       }
 
       if (foundActiveDomain) {
-        console.log(`✅ YENİ DOMAİN AKTİF (LOOKAHEAD): ${foundActiveDomain}`);
+        console.log(`✅ YENİ DOMAİN GERÇEKTEN AKTİF OLDU: ${foundActiveDomain}`);
         
         await sendSuccessAlert(foundActiveDomain);
         
@@ -174,21 +175,23 @@ cron.schedule('* * * * *', async () => {
         state.currentState = 'OK';
         state.pendingDomain = null;
         state.blockedAt = null;
+        state.lastAlertAt = null;
         DomainService.saveState(state);
       } 
       else {
-        // Hedeflerden hiçbiri aktif değil. Süreyi kontrol et.
-        const blockedTime = new Date(state.blockedAt).getTime();
-        const diffMinutes = (now.getTime() - blockedTime) / (1000 * 60);
+        // Yeni sunucu henüz aktif değil (ya Cloudflare 404 dönüyor, ya da DNS ayarlanmamış).
+        // 2 Saatte bir uyarı gönder (120 dakika)
+        const lastAlertTime = state.lastAlertAt ? new Date(state.lastAlertAt).getTime() : new Date(state.blockedAt).getTime();
+        const diffMinutes = (now.getTime() - lastAlertTime) / (1000 * 60);
 
-        if (diffMinutes >= 15 && state.currentState === 'PENDING') {
-          // Gecikme uyarısında tahmini domaini (current + 1) gösteriyoruz
-          const expectedNext = DomainService.getNextDomain(state.currentDomain, 1);
-          console.log(`⚠️ 15 DAKİKA GEÇTİ, SAĞLAYICI GECİKTİ: Beklenen ${expectedNext}`);
+        if (diffMinutes >= 120) {
+          const expectedNext = state.pendingDomain || DomainService.getNextDomain(state.currentDomain, 1);
+          console.log(`⚠️ 2 SAAT GEÇTİ, SAĞLAYICI HALA GECİKİYOR: Beklenen ${expectedNext}`);
           
           await sendDelayAlert(expectedNext);
           
           state.currentState = 'RE_ALERT';
+          state.lastAlertAt = now.toISOString();
           DomainService.saveState(state);
         }
       }
@@ -304,8 +307,10 @@ const initializeSystem = async () => {
 
   const state = DomainService.getState();
   console.log(`🔍 Bot başlıyor... Şu an izlenen domain: ${state.currentDomain} | Durum: ${state.currentState}`);
-  // DIKKAT: Burada artık otomatik domain atlaması YAPILMIYOR.
-  // Domain değiştirmek için grupta /setdomain jiletbahis103.com komutunu kullan.
+  // DIKKAT: Otomatik geçiş /setdomain komutu iptal edildi,
+  // çünkü artık sistem 404 ve 522'leri ayırıyor. Otomatik şekilde, yazılımcı backend'i gerçekten 200 yapana kadar 
+  // bekleyip, 200'ü gördüğü saniye "Geçiş Tamamlandı" diyebilecek zekaya ulaştı.
+  console.log("Manuel komutlara son. Tam otomatik sistem aktif.");
 
   bot.launch().then(() => {
     console.log('🛡️ Domain Tip Botu başarıyla başlatıldı ve DNS izleme devrede...');

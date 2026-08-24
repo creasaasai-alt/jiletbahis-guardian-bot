@@ -11,6 +11,7 @@ interface StateData {
   currentState: BotState;
   pendingDomain: string | null;
   blockedAt: string | null;
+  lastAlertAt: string | null;
 }
 
 const DEFAULT_STATE: StateData = {
@@ -18,6 +19,7 @@ const DEFAULT_STATE: StateData = {
   currentState: 'OK',
   pendingDomain: null,
   blockedAt: null,
+  lastAlertAt: null,
 };
 
 export class DomainService {
