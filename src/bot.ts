@@ -35,13 +35,14 @@ const sendBlockedAlert = async (oldDomain: string, targetDomain: string, dnsChec
       ispDetails += `${r.emoji} **${r.name}:** ${statusStr}\n`;
     });
   } else {
-    ispDetails = `🟠 **TTNET:** ❌ ENGELLİ\n💛 **Turkcell:** ❌ ENGELLİ\n🔴 **Vodafone:** ❌ ENGELLİ\n`; // Test için fallback
+    ispDetails = `🟠 **TTNET:** ❌ ENGELLİ\n💛 **Turkcell:** ❌ ENGELLİ\n🔴 **Vodafone:** ✅ AÇIK\n`; // Test için fallback
   }
 
   const message = `🚨 **BTK ENGELİ TESPİT EDİLDİ!**\n\n` +
-                  `İzlenen domain (\`${oldDomain}\`) an itibarıyla patlamıştır.\n\n` +
-                  `**İstihbarat Raporu:**\n${ispDetails}\n` +
-                  `⚠️ **AKSİYON GEREKİYOR:** Lütfen acilen \`${targetDomain}\` adresine geçişi sağlayıp DNS yönlendirmelerini yapınız!`;
+                  `Mevcut adresimiz (\`${oldDomain}\`) an itibarıyla engellenmiştir.\n\n` +
+                  `🔍 **Sorun Nedeni:** BTK / Sağlayıcı Engeli\n` +
+                  `📊 **Sağlayıcı (ISP) Durum Raporu:**\n${ispDetails}\n` +
+                  `⚠️ **AKSİYON GEREKİYOR:**\nŞu an henüz yeni adrese (\`${targetDomain}\`) **GEÇİLMEDİ**. Yönlendirmelerin ve altyapı taşıma işlemlerinin IT ekibi tarafından yapılması bekleniyor!`;
   try {
     await bot.telegram.sendMessage(groupId, message, {
       parse_mode: 'Markdown',
@@ -52,10 +53,11 @@ const sendBlockedAlert = async (oldDomain: string, targetDomain: string, dnsChec
   }
 };
 
-const sendDelayAlert = async (targetDomain: string) => {
-  const message = `⚠️ **HATIRLATMA: GEÇİŞ BEKLENİYOR**\n\n` +
-                  `Mevcut domain hala engelli durumda. Yeni adresin (\`${targetDomain}\`) aktif olması (HTTP 200) bekleniyor.\n\n` +
-                  `Lütfen yönlendirmelerin yapıldığından emin olunuz. 2 saatte bir durum kontrolü yapılacaktır.`;
+const sendDelayAlert = async (oldDomain: string, targetDomain: string) => {
+  const message = `⚠️ **HATIRLATMA: GEÇİŞ İŞLEMİ BEKLENİYOR**\n\n` +
+                  `\`${oldDomain}\` üzerindeki BTK engeli devam etmektedir.\n` +
+                  `Sistem arka planda yeni adresi (\`${targetDomain}\`) tarıyor ancak yeni adres henüz aktif edilmemiş (Sunucu 200 yanıtı vermiyor).\n\n` +
+                  `⏳ IT ekibinin geçiş işlemlerini tamamlaması beklenmektedir.`;
   try {
     await bot.telegram.sendMessage(groupId, message, {
       parse_mode: 'Markdown',
@@ -67,9 +69,9 @@ const sendDelayAlert = async (targetDomain: string) => {
 };
 
 const sendSuccessAlert = async (newDomain: string) => {
-  const message = `✅ **GEÇİŞ TAMAMLANDI - YENİ ADRES AKTİF**\n\n` +
-                  `Sistemlerimiz \`${newDomain}\` adresinin global olarak yayına girdiğini ve sağlıklı (HTTP 200) yanıt verdiğini teyit etmiştir.\n\n` +
-                  `Nöbete devam ediliyor 🛡️`;
+  const message = `✅ **GEÇİŞ TAMAMLANDI - YENİ ADRES AKTİF!**\n\n` +
+                  `IT ekibi tarafından işlemler tamamlandı. \`${newDomain}\` an itibarıyla global ağlarda aktif ve sorunsuz (HTTP 200) yanıt veriyor.\n\n` +
+                  `🛡️ Radar sistemi yeni adresi izlemeye aldı, nöbete devam ediliyor.`;
   try {
     await bot.telegram.sendMessage(groupId, message, {
       parse_mode: 'Markdown',
@@ -81,9 +83,11 @@ const sendSuccessAlert = async (newDomain: string) => {
   }
 };
 
-const sendServerDownAlert = async () => {
-  const message = `⚠️ **Sistem Erişimi Kesintisi**\n\n` +
-                  `Sunucularımıza bağlantı şu anda kurulamıyor. Teknik ekibimiz sorunu inceliyor, lütfen bekleyiniz.`;
+const sendServerDownAlert = async (currentDomain: string) => {
+  const message = `⚠️ **SUNUCU BAĞLANTISI KOPTU!**\n\n` +
+                  `Mevcut adresimizde (\`${currentDomain}\`) herhangi bir BTK engeli bulunmuyor, ancak site şu an **KAPALI** (HTTP 200 yanıtı vermiyor).\n\n` +
+                  `🔍 **Sorun Nedeni:** Sunucu Çökmesi veya Cloudflare Hatası (örn: 522/404)\n\n` +
+                  `⚠️ **AKSİYON GEREKİYOR:** Lütfen sunucuları, veritabanını ve Cloudflare ayarlarını acilen kontrol ediniz!`;
   try {
     await bot.telegram.sendMessage(groupId, message, {
       parse_mode: 'Markdown',
@@ -95,8 +99,9 @@ const sendServerDownAlert = async () => {
 };
 
 const sendServerRecoveryAlert = async (domain: string) => {
-  const message = `✅ **Sistem Erişimi Sağlandı**\n\n` +
-                  `Sunucularımızdaki erişim sorunu giderilmiştir. Güncel adresimiz (\`${domain}\`) üzerinden işlemlerinize devam edebilirsiniz.`;
+  const message = `✅ **SİSTEM ERİŞİMİ DÜZELDİ**\n\n` +
+                  `Sunucularımızdaki erişim sorunu giderilmiştir. \`${domain}\` tekrar sağlıklı bir şekilde (HTTP 200) yanıt veriyor.\n\n` +
+                  `🛡️ Radar izlemeye devam ediyor.`;
   try {
     await bot.telegram.sendMessage(groupId, message, {
       parse_mode: 'Markdown',
@@ -141,7 +146,7 @@ cron.schedule('* * * * *', async () => {
         console.log(`⚠️ SUNUCU ÇÖKTÜ: ${state.currentDomain} HTTP 200 dönmüyor!`);
         state.currentState = 'SERVER_DOWN';
         DomainService.saveState(state);
-        await sendServerDownAlert();
+        await sendServerDownAlert(state.currentDomain);
       } 
       else if (isHealthy && state.currentState === 'SERVER_DOWN') {
         console.log(`✅ SUNUCU GERİ GELDİ: ${state.currentDomain}`);
@@ -188,7 +193,7 @@ cron.schedule('* * * * *', async () => {
           const expectedNext = state.pendingDomain || DomainService.getNextDomain(state.currentDomain, 1);
           console.log(`⚠️ 2 SAAT GEÇTİ, SAĞLAYICI HALA GECİKİYOR: Beklenen ${expectedNext}`);
           
-          await sendDelayAlert(expectedNext);
+          await sendDelayAlert(state.currentDomain, expectedNext);
           
           state.currentState = 'RE_ALERT';
           state.lastAlertAt = now.toISOString();
@@ -273,7 +278,7 @@ bot.command('testdomain', async (ctx) => {
 
   // 2. Birkaç saniye sonra Gecikme Uyarısını Yolla
   setTimeout(async () => {
-    await sendDelayAlert(next);
+    await sendDelayAlert(current, next);
   }, 2000);
 
   // 3. Birkaç saniye sonra Başarı Mesajını Yolla
@@ -289,7 +294,7 @@ bot.command('testcokme', async (ctx) => {
 
   await ctx.reply("⚠️ **TEST ÖNİZLEME:** Sunucu Çökme ve Kurtarma uyarıları gösteriliyor...", { parse_mode: 'Markdown' });
 
-  await sendServerDownAlert();
+  await sendServerDownAlert(current);
 
   setTimeout(async () => {
     await sendServerRecoveryAlert(current);
