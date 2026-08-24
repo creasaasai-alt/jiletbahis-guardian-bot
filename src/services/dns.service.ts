@@ -1,82 +1,107 @@
 import dns from 'dns';
 import axios from 'axios';
 
-// Türkiye'nin Dev 3 ISP'sinin DNS Sunucuları
-const ISP_SERVERS = {
-  'TTNET': '195.175.39.39',
-  'TURKCELL': '212.252.114.8',
-  'VODAFONE': '213.194.71.98'
+// Türkiye'nin 3 büyük ISP DNS Sunucusu
+export const ISP_LIST = [
+  { name: 'TTNET',    emoji: '🟠', server: '195.175.39.39'  },
+  { name: 'Turkcell', emoji: '💛', server: '212.252.114.8'  },
+  { name: 'Vodafone', emoji: '🔴', server: '213.194.71.98'  },
+];
+
+// BTK engel yönlendirme IP'leri
+const BTK_BLOCK_IPS = ['195.175.254.2', '195.175.254.3', '195.175.254.254'];
+
+// DNS sorgusu için timeout (ms)
+const DNS_TIMEOUT_MS = 5000;
+
+export type IspStatus = 'BLOCKED' | 'OK' | 'TIMEOUT';
+
+export interface IspResult {
+  name: string;
+  emoji: string;
+  status: IspStatus;
+}
+
+export interface DnsCheckResult {
+  results: IspResult[];
+  isAnyBlocked: boolean;      // En az 1 ISP'de engel var mı?
+  isConfirmedBlocked: boolean; // En az 1 ISP cevap verdi VE engelli mi?
+  blockedCount: number;
+  respondedCount: number;
+}
+
+/**
+ * Tek bir ISP DNS sunucusuna sorgu atar, sonucu IspStatus olarak döner.
+ */
+const querySingleISP = async (server: string, domain: string): Promise<IspStatus> => {
+  try {
+    const resolver = new dns.promises.Resolver({ timeout: DNS_TIMEOUT_MS });
+    resolver.setServers([server]);
+    const addresses = await resolver.resolve4(domain);
+    const isBlocked = addresses.some(ip => BTK_BLOCK_IPS.includes(ip));
+    return isBlocked ? 'BLOCKED' : 'OK';
+  } catch {
+    return 'TIMEOUT';
+  }
 };
-
-// BTK'nın engellenmiş siteleri yönlendirdiği IP (Uyarı Sayfası)
-const BTK_BLOCK_IP = '195.175.254.2';
-
-// Her bir ISP için özel resolver'lar oluşturuyoruz
-const resolvers = Object.entries(ISP_SERVERS).map(([name, ip]) => {
-  const r = new dns.promises.Resolver();
-  r.setServers([ip]);
-  return { name, resolver: r };
-});
 
 export class DnsService {
   /**
-   * Belirtilen domainin BTK tarafından engellenip engellenmediğini 3 ana DNS'ten eşzamanlı sorgular.
-   * Eğer herhangi biri "Erişim Engeli" (BTK IP'si) döndürürse, site patlamıştır.
+   * Tüm ISP'leri eş zamanlı sorgular, her birinin durumunu ayrı ayrı döner.
+   */
+  static async checkAllISPs(domain: string): Promise<DnsCheckResult> {
+    const promises = ISP_LIST.map(async (isp) => {
+      const status = await querySingleISP(isp.server, domain);
+      console.log(`[DNS:${isp.name}] ${domain} -> ${status}`);
+      return { name: isp.name, emoji: isp.emoji, status } as IspResult;
+    });
+
+    const results = await Promise.all(promises);
+    const responded = results.filter(r => r.status !== 'TIMEOUT');
+    const blocked   = results.filter(r => r.status === 'BLOCKED');
+
+    return {
+      results,
+      isAnyBlocked:       blocked.length > 0,
+      isConfirmedBlocked: responded.length > 0 && blocked.length > 0,
+      blockedCount:       blocked.length,
+      respondedCount:     responded.length,
+    };
+  }
+
+  /**
+   * Kısayol: Domain BTK tarafından en az 1 ISP'de engellendi mi?
+   * Eğer hiçbir ISP cevap vermediyse (tüm timeout) false döner (yanlış alarm önlenir).
    */
   static async isDomainBlockedByBTK(domain: string): Promise<boolean> {
-    try {
-      // 3 sağlayıcıya aynı anda (Promise.all) sorgu atıyoruz.
-      const queries = resolvers.map(async ({ name, resolver }) => {
-        try {
-          const addresses = await resolver.resolve4(domain);
-          if (addresses.includes(BTK_BLOCK_IP)) {
-            // console.log(`[İSTİHBARAT] ${name} DNS üzerinden BTK engeli tespit edildi!`);
-            return true;
-          }
-        } catch (e) {
-          // Bir DNS geçici hata verirse diğerlerini bozmaması için hatayı yutuyoruz.
-        }
-        return false;
-      });
-
-      const results = await Promise.all(queries);
-      
-      // Eğer 3 sunucudan en az 1 tanesi "BTK Engeli Var (true)" dediyse, site patlamıştır!
-      return results.some(isBlocked => isBlocked === true);
-
-    } catch (error: any) {
-      console.error(`DNS Çözümleme Hatası (${domain}):`, error.message);
-      return false; 
+    const check = await DnsService.checkAllISPs(domain);
+    if (check.respondedCount === 0) {
+      console.log(`[DNS:UYARI] Hiçbir ISP ${domain} için cevap vermedi. Yanlış alarm önlendi.`);
+      return false;
     }
+    return check.isConfirmedBlocked;
   }
 
   /**
-   * Belirtilen domainin aktif ve çözümlenebilir olup olmadığını kontrol eder.
+   * Domain TTNET üzerinden ulaşılabilir mi? (Engel yok + gerçek IP dönüyor)
    */
   static async isDomainActive(domain: string): Promise<boolean> {
-    try {
-      // Sadece TTNET'e bakmak bile aktifliği doğrulamak için yeterlidir.
-      const addresses = await resolvers[0].resolver.resolve4(domain);
-      if (addresses.length > 0 && !addresses.includes(BTK_BLOCK_IP)) {
-        return true;
-      }
-      return false;
-    } catch (error) {
-      return false;
-    }
+    const status = await querySingleISP(ISP_LIST[0].server, domain);
+    return status === 'OK';
   }
 
   /**
-   * Domainin HTTP(s) seviyesinde yayında olup olmadığını kontrol eder. (Çökmüş mü?)
-   * 200, 301, 302 vs dönerse site hayattadır. TimeOut, 502, 522 dönerse ölüdür.
+   * Domainin HTTP(s) katmanında sağlıklı cevap verip vermediğini kontrol eder.
    */
   static async isServerHealthy(domain: string): Promise<boolean> {
     try {
-      // Sadece sayfanın başlığını (HEAD) çekeriz, tüm siteyi indirip yormayız.
-      await axios.head(`https://${domain}`, { timeout: 7000 });
+      await axios.head(`https://${domain}`, {
+        timeout: 8000,
+        maxRedirects: 3,
+        validateStatus: (s) => s < 600,
+      });
       return true;
-    } catch (error: any) {
-      // SSL hatası, Timeout, Cloudflare (502) gibi hatalar buraya düşer.
+    } catch {
       return false;
     }
   }

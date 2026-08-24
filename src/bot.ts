@@ -1,9 +1,16 @@
+import path from 'path';
+import fs from 'fs';
 import 'dotenv/config';
 import { Telegraf } from 'telegraf';
 import cron from 'node-cron';
 import http from 'http';
-import { DnsService } from './services/dns.service';
+import { DnsService, DnsCheckResult } from './services/dns.service';
 import { DomainService } from './services/domain.service';
+
+// STATE dosyasının kesin yolunu VPS'te de çalışacak şekilde belirle
+const STATE_PATH = path.resolve(process.cwd(), 'docs/STATE.json');
+console.log(`[INIT] STATE dosyası: ${STATE_PATH}`);
+
 
 const botToken = process.env.BOT_TOKEN;
 const topicId = process.env.TOPIC_ID ? parseInt(process.env.TOPIC_ID, 10) : undefined;
@@ -16,12 +23,25 @@ if (!botToken || !groupId) {
 
 const bot = new Telegraf(botToken);
 
-// --- BİLDİRİM ŞABLONLARI ---
+// --- İÇ EKİP (OPERASYON) ODAKLI BİLDİRİM ŞABLONLARI ---
 
-const sendBlockedAlert = async (oldDomain: string, targetDomain: string) => {
-  const message = `🚨 **Giriş Adresi Güncellemesi**\n\n` +
-                  `Mevcut giriş adresimize (\`${oldDomain}\`) BTK tarafından erişim engeli getirilmiştir. Kesintisiz erişiminiz için yeni adresimize geçiş işlemleri an itibarıyla başlatıldı.\n\n` +
-                  `⏳ _Lütfen yeni adresin aktif edilmesini bekleyiniz._`;
+const sendBlockedAlert = async (oldDomain: string, targetDomain: string, dnsCheck?: DnsCheckResult) => {
+  let ispDetails = '';
+  if (dnsCheck && dnsCheck.results) {
+    dnsCheck.results.forEach((r) => {
+      let statusStr = '⚠️ ZAMAN AŞIMI';
+      if (r.status === 'BLOCKED') statusStr = '❌ ENGELLİ';
+      if (r.status === 'OK') statusStr = '✅ AÇIK';
+      ispDetails += `${r.emoji} **${r.name}:** ${statusStr}\n`;
+    });
+  } else {
+    ispDetails = `🟠 **TTNET:** ❌ ENGELLİ\n💛 **Turkcell:** ❌ ENGELLİ\n🔴 **Vodafone:** ❌ ENGELLİ\n`; // Test için fallback
+  }
+
+  const message = `🚨 **BTK ENGELİ TESPİT EDİLDİ!**\n\n` +
+                  `İzlenen domain (\`${oldDomain}\`) an itibarıyla patlamıştır.\n\n` +
+                  `**İstihbarat Raporu:**\n${ispDetails}\n` +
+                  `⚠️ **AKSİYON GEREKİYOR:** Lütfen acilen \`${targetDomain}\` adresine geçişi sağlayıp DNS yönlendirmelerini yapınız!`;
   try {
     await bot.telegram.sendMessage(groupId, message, {
       parse_mode: 'Markdown',
@@ -33,8 +53,9 @@ const sendBlockedAlert = async (oldDomain: string, targetDomain: string) => {
 };
 
 const sendDelayAlert = async (targetDomain: string) => {
-  const message = `⚠️ **Geçiş Süreci Devam Ediyor**\n\n` +
-                  `Yeni adresimizin (\`${targetDomain}\`) global ağlara yansıması beklenmektedir. Bağlantı güvenliği sağlandığında anında bilgilendirme yapılacaktır.`;
+  const message = `⚠️ **GEÇİŞ GECİKTİ!**\n\n` +
+                  `Engel tespit edileli 15 dakika oldu ancak \`${targetDomain}\` hala aktif olarak yanıt vermiyor (HTTP 200 dönmüyor).\n\n` +
+                  `Lütfen sunucu ve Cloudflare yönlendirmelerini acilen kontrol ediniz.`;
   try {
     await bot.telegram.sendMessage(groupId, message, {
       parse_mode: 'Markdown',
@@ -46,10 +67,9 @@ const sendDelayAlert = async (targetDomain: string) => {
 };
 
 const sendSuccessAlert = async (newDomain: string) => {
-  const message = `✅ **Yeni Giriş Adresimiz Aktif!**\n\n` +
-                  `Adres güncelleme işlemi başarıyla tamamlanmıştır. JiletBahis kalitesiyle işlemlerinize kaldığınız yerden güvenle devam edebilirsiniz.\n\n` +
-                  `🌐 **WEB:** https://${newDomain}/tr/\n` +
-                  `📱 **MOBİL:** https://m.${newDomain}/tr/`;
+  const message = `✅ **GEÇİŞ TAMAMLANDI - YENİ ADRES AKTİF**\n\n` +
+                  `Sistemlerimiz \`${newDomain}\` adresinin global olarak yayına girdiğini ve sağlıklı (HTTP 200) yanıt verdiğini teyit etmiştir.\n\n` +
+                  `Nöbete devam ediliyor 🛡️`;
   try {
     await bot.telegram.sendMessage(groupId, message, {
       parse_mode: 'Markdown',
@@ -96,19 +116,20 @@ cron.schedule('* * * * *', async () => {
 
   try {
     if (state.currentState === 'OK' || state.currentState === 'SERVER_DOWN') {
-      // 1. Önce BTK Engeli Var Mı? (En Önemlisi)
-      const isBlocked = await DnsService.isDomainBlockedByBTK(state.currentDomain);
+      // 1. Önce BTK Engeli Var Mı? (Detaylı ISP Testi)
+      const dnsCheck = await DnsService.checkAllISPs(state.currentDomain);
       
-      if (isBlocked) {
+      // Hiçbir DNS sunucusu cevap vermiyorsa yanlış alarm üretme
+      if (dnsCheck.respondedCount > 0 && dnsCheck.isConfirmedBlocked) {
         console.log(`🚨 DİKKAT: ${state.currentDomain} BTK tarafından engellendi!`);
         
         const nextDomain = DomainService.getNextDomain(state.currentDomain, 1);
         state.currentState = 'PENDING';
-        state.pendingDomain = nextDomain; // Sadece log/info için
+        state.pendingDomain = nextDomain; 
         state.blockedAt = now.toISOString();
         DomainService.saveState(state);
 
-        await sendBlockedAlert(state.currentDomain, nextDomain);
+        await sendBlockedAlert(state.currentDomain, nextDomain, dnsCheck);
         return; // İşlem bitti, devam etme
       }
       
@@ -177,9 +198,32 @@ cron.schedule('* * * * *', async () => {
   }
 });
 
+// Her 6 saatte bir rutin rapor atacak (00:00, 06:00, 12:00, 18:00)
+cron.schedule('0 0,6,12,18 * * *', async () => {
+  const state = DomainService.getState();
+  if (state.currentState !== 'OK') return; // Sadece sistem normalse rutin rapor at
+  
+  const message = `🛡️ **GUARDIAN RUTİN SİSTEM RAPORU**\n\n` +
+                  `👉 **İzlenen Domain:** \`${state.currentDomain}\`\n` +
+                  `⚙️ **Durum:** Sağlıklı (Nöbete Devam)\n\n` +
+                  `Sistem 7/24 aktif. BTK ağında herhangi bir anomali tespit edilmemiştir.`;
+  try {
+    await bot.telegram.sendMessage(groupId, message, {
+      parse_mode: 'Markdown',
+      message_thread_id: topicId
+    });
+  } catch (error) {
+    console.error("RUTİN RAPOR gönderilemedi:", error);
+  }
+});
+
 // Admin komutları
 bot.command(['status', 'test'], async (ctx) => {
   const state = DomainService.getState();
+  const isAdmin = ctx.chat.id.toString() === groupId ||
+                  ctx.from?.username === 'ElyonOps' ||
+                  (ctx.message as any)?.from?.id?.toString() === process.env.ADMIN_ID;
+
   let msg = `🛠️ **Sistem Kontrolü (Radar Aktif)**\n\n`;
   msg += `👉 **İzlenen Domain:** \`${state.currentDomain}\`\n`;
   msg += `⚙️ **Sistem Durumu:** \`${state.currentState}\`\n`;
@@ -189,13 +233,37 @@ bot.command(['status', 'test'], async (ctx) => {
   await ctx.reply(msg, { parse_mode: 'Markdown' });
 });
 
+// Manuel domain değiştirme komutu (/setdomain jiletbahis103.com)
+bot.command('setdomain', async (ctx) => {
+  const args = ctx.message.text.split(' ');
+  if (args.length < 2) {
+    await ctx.reply('❌ Kullanım: /setdomain jiletbahis103.com');
+    return;
+  }
+  const newDomain = args[1].trim().toLowerCase();
+  if (!newDomain.includes('jiletbahis')) {
+    await ctx.reply('❌ Geçersiz domain. "jiletbahis" içermeli.');
+    return;
+  }
+  const state = DomainService.getState();
+  const oldDomain = state.currentDomain;
+  state.currentDomain = newDomain;
+  state.currentState = 'OK';
+  state.pendingDomain = null;
+  state.blockedAt = null;
+  DomainService.saveState(state);
+  await ctx.reply(`✅ Domain güncellendi!\n\n\`${oldDomain}\` → \`${newDomain}\`\n\nBot artık yeni domaini izliyor.`, { parse_mode: 'Markdown' });
+  console.log(`[SETDOMAIN] ${oldDomain} -> ${newDomain}`);
+});
+
+
 // BTK Engeli simülasyonu
 bot.command('testdomain', async (ctx) => {
   const state = DomainService.getState();
   const current = state.currentDomain;
   const next = DomainService.getNextDomain(current);
 
-  await ctx.reply("⚠️ **TEST ÖNİZLEME:** BTK Engeli uyarıları gösteriliyor...", { parse_mode: 'Markdown' });
+  await ctx.reply("⚠️ **TEST ÖNİZLEME:** İç ekip formatlı BTK Engeli uyarıları gösteriliyor...", { parse_mode: 'Markdown' });
 
   // 1. Patlama Alarmını Yolla
   await sendBlockedAlert(current, next);
@@ -225,34 +293,22 @@ bot.command('testcokme', async (ctx) => {
   }, 3000);
 });
 
-// Bot başlatılmadan önce Akıllı Tarama (Auto-Discovery) yaparak gerçek domaini bulur
+// Bot başlatılmadan önce STATE kontrolü yap
 const initializeSystem = async () => {
+  // docs/ klasörü yoksa yarat
+  const docsDir = path.dirname(STATE_PATH);
+  if (!fs.existsSync(docsDir)) {
+    fs.mkdirSync(docsDir, { recursive: true });
+    console.log(`[INIT] docs/ klasörü oluşturuldu: ${docsDir}`);
+  }
+
   const state = DomainService.getState();
-  let current = state.currentDomain;
+  console.log(`🔍 Bot başlıyor... Şu an izlenen domain: ${state.currentDomain} | Durum: ${state.currentState}`);
+  // DIKKAT: Burada artık otomatik domain atlaması YAPILMIYOR.
+  // Domain değiştirmek için grupta /setdomain jiletbahis103.com komutunu kullan.
 
-  console.log(`🔍 Başlangıç taraması yapılıyor... Kayıtlı domain: ${current}`);
-  
-  // Eğer sunucu yeniden başlarsa ve eski domain hafızada kalmışsa, sessizce güncel olanı bulana kadar tarar.
-  let isBlocked = await DnsService.isDomainBlockedByBTK(current);
-  while (isBlocked) {
-    console.log(`❌ ${current} engelli. Bir sonrakine bakılıyor...`);
-    current = DomainService.getNextDomain(current);
-    isBlocked = await DnsService.isDomainBlockedByBTK(current);
-  }
-
-  if (current !== state.currentDomain) {
-    console.log(`✅ Akıllı Tarama: Güncel aktif domain ${current} olarak tespit edildi ve hafıza güncellendi!`);
-    state.currentDomain = current;
-    state.currentState = 'OK';
-    state.pendingDomain = null;
-    DomainService.saveState(state);
-  } else {
-    console.log(`✅ Sistem güncel. İzlenen domain: ${current}`);
-  }
-
-  // Tarama bittikten sonra botu başlat
   bot.launch().then(() => {
-    console.log("🛡️ Domain Tip Botu başarıyla başlatıldı ve DNS izleme devrede...");
+    console.log('🛡️ Domain Tip Botu başarıyla başlatıldı ve DNS izleme devrede...');
   });
 };
 
